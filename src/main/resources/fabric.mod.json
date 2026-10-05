@@ -1,0 +1,30 @@
+{
+	"schemaVersion": 1,
+	"id": "chatagents",
+	"version": "${version}",
+	"name": "Chat Agents",
+	"description": "Brings coding-agent CLIs (Claude Code, Antigravity) into Minecraft chat as helpers players can talk to.",
+	"license": "MIT",
+	"environment": "server",
+	"entrypoints": {
+		"server": [
+			"gay.muni.chatagents.ChatAgents"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.3",
+		"java": ">=25",
+		"fabric-api": "*"
+	},
+	"mixins": [
+		"chatagents.mixins.json"
+	],
+	"authors": [
+		"xctwt"
+	],
+	"contact": {
+		"sources": "https://github.com/xctwt/chat-agents",
+		"issues": "https://github.com/xctwt/chat-agents/issues"
+	}
+}
