@@ -1,15 +1,18 @@
 # Chat Agents
 
 A server-side Fabric mod that puts coding-agent CLIs into Minecraft chat as helpers players can talk to.
-It currently supports [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`) and the
-[Antigravity CLI](https://antigravity.google/docs/cli) (`agy`), and you can run several agents side by side. Each one
-can be turned on or off in game or from the server console.
+It currently supports [Claude Code](https://docs.claude.com/en/docs/claude-code) (`claude`), the
+[Antigravity CLI](https://antigravity.google/docs/cli) (`agy`), the [Codex CLI](https://developers.openai.com/codex/cli)
+(`codex`) and [opencode](https://opencode.ai) (`opencode`), and you can run several agents side by side. Each one can be
+turned on or off in game or from the server console.
 
 ```
 <catwaita> clod can you skip the night
 <clod> on it~ (˶ᵔ ᵕ ᵔ˶) ...done, good morning!
-<yeerboo> agy what's the weather in astana
+<steve> agy what's the weather in astana
 <agy> 12°C and clear right now ✦
+<steve> codex who's online?
+<codex> just you and catwaita
 ```
 
 Requires Minecraft 26.3, Fabric Loader 0.19.5+, Fabric API and Java 25. The mod is server-only; players don't need it.
@@ -39,7 +42,9 @@ Requires Minecraft 26.3, Fabric Loader 0.19.5+, Fabric API and Java 25. The mod 
    - Claude Code: `curl -fsSL https://claude.ai/install.sh | bash`, then run `claude` and log in.
    - Antigravity: `curl -fsSL https://antigravity.google/cli/install.sh | bash`, then run `agy` and sign in (or set
      `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` and export `GEMINI_API_KEY`).
-3. Start the server once. This creates `config/chatagents/config.json`, with both agents off, and a prompt per agent
+   - Codex: `npm install -g @openai/codex`, then run `codex` and sign in with ChatGPT (or export `CODEX_API_KEY`).
+   - opencode: `curl -fsSL https://opencode.ai/install | bash`, then run `opencode auth login` for your provider.
+3. Start the server once. This creates `config/chatagents/config.json`, with every agent off, and a prompt per agent
    in `config/chatagents/prompts/`. Check the `command` paths, edit the prompts, then turn the agents on.
 
 ## Turning agents on and off
@@ -77,14 +82,14 @@ Turning an agent off kills a turn it's in the middle of and drops its queued mes
       "id": "clod",                    // also the command: /clod
       "displayName": "clod",
       "color": "gold",                 // Minecraft color name for the name tag
-      "backend": "claude",             // or "antigravity"
+      "backend": "claude",             // or "antigravity", "codex", "opencode"
       "enabled": true,
       "triggers": ["claude", "clod"],  // matched case-insensitively at the start of a word, any script
       "command": "/home/mc/.local/bin/claude",
       "home": "",                      // HOME for the CLI, if its login lives elsewhere
       "workdir": "config/chatagents/work/clod",
-      "model": "claude-sonnet-5-5",
-      "effort": "low",
+      "model": "claude-sonnet-5-5",    // opencode wants provider/model, e.g. "anthropic/claude-sonnet-5-5"
+      "effort": "low",                 // opencode: a model variant name; "" leaves it out
       "systemPrompt": "clod.md",       // in config/chatagents/prompts; {name} and {triggers} are filled in
       "events": true,                  // react to deaths/advancements
       "greetNewcomers": true,
@@ -108,6 +113,15 @@ adding or removing agents needs a restart.
   flag, so the prompt is written to `AGENTS.md` in the agent's workdir. The mod adds the console server to
   `$HOME/.gemini/config/mcp_config.json`, and the rules `mcp(minecraft/*)` (allow) and `command(*)` (deny) to
   `$HOME/.gemini/antigravity-cli/settings.json`.
+- **codex** runs `codex exec --json` and resumes with `codex exec resume <thread>`. Everything is passed as `-c`
+  overrides, so `~/.codex/config.toml` isn't touched: the prompt goes in as `developer_instructions`, the console tool
+  as an HTTP MCP server whose token comes from an environment variable, the shell tool is turned off
+  (`features.shell_tool=false`), the sandbox is read-only, and web search is live. The workdir doesn't need to be a
+  git repo (`--skip-git-repo-check`).
+- **opencode** runs `opencode run --format json` and resumes with `--session`. The mod passes an inline config in
+  `OPENCODE_CONFIG_CONTENT` that adds the console server and a `chatagents` agent with the prompt and the permissions
+  `*` deny, `minecraft_*`, `webfetch` and `websearch` allow; your own opencode config is merged in as usual. `model`
+  is `provider/model` and `effort` is passed as `--variant`. Usage per turn, with cost, goes to `usage.jsonl`.
 
 ### Reply tags
 

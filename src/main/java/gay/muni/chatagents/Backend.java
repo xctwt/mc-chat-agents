@@ -23,6 +23,8 @@ abstract class Backend {
 		return switch (agent.cfg.backend) {
 			case "claude" -> new ClaudeBackend(agent);
 			case "antigravity" -> new AntigravityBackend(agent);
+			case "codex" -> new CodexBackend(agent);
+			case "opencode" -> new OpenCodeBackend(agent);
 			default -> throw new IllegalArgumentException("unknown backend: " + agent.cfg.backend);
 		};
 	}
@@ -54,12 +56,19 @@ abstract class Backend {
 
 	/** Starts the CLI, feeds stdin, hands each stdout line to onLine, and kills it after the turn timeout. */
 	Output exec(List<String> cmd, String stdin, Consumer<String> onLine) throws IOException, InterruptedException {
+		return exec(cmd, stdin, Map.of(), onLine);
+	}
+
+	/** Like exec, with extra environment variables set after the agent's own (e.g. the console tool's token). */
+	Output exec(List<String> cmd, String stdin, Map<String, String> extraEnv, Consumer<String> onLine)
+			throws IOException, InterruptedException {
 		List<String> full = new java.util.ArrayList<>(agent.cfg.commandPrefix);
 		full.addAll(cmd);
 		ProcessBuilder pb = new ProcessBuilder(full).directory(agent.workdir.toFile());
 		Map<String, String> env = pb.environment();
 		if (!agent.cfg.home.isEmpty()) env.put("HOME", agent.cfg.home);
 		env.putAll(agent.cfg.env);
+		env.putAll(extraEnv);
 		Process p = pb.start();
 		process = p;
 		StringBuilder err = new StringBuilder();

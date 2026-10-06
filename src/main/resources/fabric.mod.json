@@ -3,7 +3,7 @@
 	"id": "chatagents",
 	"version": "${version}",
 	"name": "Chat Agents",
-	"description": "Brings coding-agent CLIs (Claude Code, Antigravity) into Minecraft chat as helpers players can talk to.",
+	"description": "Brings coding-agent CLIs (Claude Code, Antigravity, Codex, opencode) into Minecraft chat as helpers players can talk to.",
 	"license": "MIT",
 	"environment": "server",
 	"entrypoints": {
