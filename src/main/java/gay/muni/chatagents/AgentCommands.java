@@ -148,7 +148,7 @@ final class AgentCommands {
 		int i = 0;
 		for (Config.Route r : a.cfg.routes) {
 			long out = a.benchedFor(r);
-			String state = out > 0 ? "out of usage for " + (out >= 3600 ? out / 3600 + " h " : "") + (out % 3600) / 60 + " min"
+			String state = out > 0 ? "benched for " + (out >= 3600 ? out / 3600 + " h " : "") + (out % 3600) / 60 + " min"
 					: r == current ? "next up" : "ready";
 			if (r == active) state += ", answered last";
 			String line = ++i + ". " + a.describe(r) + (r.effort.isEmpty() ? "" : ", effort " + r.effort) + ": " + state;

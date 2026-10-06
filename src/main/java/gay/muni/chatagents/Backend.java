@@ -57,13 +57,23 @@ abstract class Backend {
 		}
 	}
 
-	static boolean isLimit(String why) {
-		return LIMIT.matcher(why).find();
+	/** Whether error text means a usage limit ran out: the built-in patterns, or one from the config's limitPatterns. */
+	boolean isLimit(String why) {
+		if (LIMIT.matcher(why).find()) return true;
+		for (String p : agent.hub.cfg.limitPatterns) {
+			if (Pattern.compile(p, Pattern.CASE_INSENSITIVE).matcher(why).find()) return true;
+		}
+		return false;
 	}
 
 	/** The exception for a failed turn: a LimitException if the error looks like a usage limit. */
-	static RuntimeException failure(String what, String why) {
+	RuntimeException failure(String what, String why) {
 		return isLimit(why) ? new LimitException(what + ": " + why, 0) : new RuntimeException(what + ": " + why);
+	}
+
+	/** The model id this harness is actually given for a route's (alias-resolved) model and effort. */
+	String modelId(String model, String effort) {
+		return model;
 	}
 
 	Config.Harness harness() {

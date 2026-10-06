@@ -261,6 +261,19 @@ final class Hub {
 		});
 	}
 
+	/** A gray system note from an agent (e.g. a route switch): to everyone, to online operators only, or nobody. */
+	void notice(Agent agent, String text, String audience) {
+		agent.log(text);
+		if (audience.equals("off")) return;
+		boolean everyone = audience.equals("everyone");
+		server.execute(() -> {
+			Component msg = Component.literal("[" + agent.cfg.displayName + "] " + text).withStyle(ChatFormatting.GRAY);
+			for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+				if (everyone || isOp(p.nameAndId().name())) p.sendSystemMessage(msg);
+			}
+		});
+	}
+
 	ToolResult runConsole(Agent agent, String command) {
 		Console.Role role = agent.turnRole;
 		if (role == null) return new ToolResult("no turn is in progress", true);

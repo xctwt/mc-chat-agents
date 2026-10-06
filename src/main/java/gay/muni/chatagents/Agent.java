@@ -38,6 +38,8 @@ final class Agent {
 	private final Map<String, Backend> backends = new ConcurrentHashMap<>();
 	/** Route key -> epoch seconds until which the route is skipped because it ran out of usage. */
 	private final Map<String, Long> benched = new ConcurrentHashMap<>();
+	/** Route key -> turns in a row it failed for reasons other than a usage limit. */
+	private final Map<String, Integer> failures = new ConcurrentHashMap<>();
 	/** The route that answered last. */
 	private volatile Config.Route active;
 	/** Bumped by halt(), so a turn that was killed on purpose doesn't fail over to the next route. */
@@ -141,13 +143,24 @@ final class Agent {
 		routes.addFirst(pick);
 		cfg.routes = routes;
 		benched.remove(pick.key()); // asked for by hand, so give it another try
+		failures.remove(pick.key());
 		return pick;
 	}
 
+	/** "agy · sonnet (claude-sonnet-5-5-low)": the route as written, plus the model id the harness is really given. */
 	String describe(Config.Route r) {
-		String model = hub.cfg.modelFor(r);
+		String model = backend(r.harness).modelId(hub.cfg.modelFor(r), r.effort);
 		String label = r.harness + " · " + (r.model.isEmpty() ? "default model" : r.model);
 		return model.equals(r.model) ? label : label + " (" + model + ")";
+	}
+
+	/** Skips a route until the given time, and tells whoever announceSwitches says. */
+	private void bench(Config.Route r, long until, String why) {
+		benched.put(r.key(), until);
+		failures.remove(r.key());
+		String next = cfg.routes.stream().filter(o -> o != r && benchedFor(o) == 0).findFirst()
+				.map(o -> "; using " + describe(o) + " for now").orElse("; no other route is free");
+		hub.notice(this, describe(r) + " " + why + ", skipping it until " + hub.localTime(until) + next, cfg.announceSwitches);
 	}
 
 	void enqueue(Item item) {
@@ -336,8 +349,9 @@ final class Agent {
 
 	/**
 	 * Runs the turn on the first route that isn't benched, moving down the list when one fails (if failover is on).
-	 * A route that ran out of usage is benched until its limit resets, so later turns skip it and come back to it
-	 * on their own afterwards. If every route is benched, the one that frees up first gets a try anyway.
+	 * A route that ran out of usage is benched until its limit resets, and one that keeps failing for other reasons
+	 * is benched for a few minutes, so later turns skip it and come back to it on their own afterwards. If every
+	 * route is benched, the one that frees up first gets a try anyway.
 	 */
 	private String turn(String prompt, Console.Role role, String kind, List<String> players) throws Exception {
 		int gen = generation;
@@ -354,22 +368,24 @@ final class Agent {
 				try {
 					String reply = backend(r.harness).run(prompt, kind, players, hub.cfg.modelFor(r), r.effort);
 					active = r;
+					failures.remove(r.key());
 					lastError = null;
 					lastReply = Instant.now();
 					return reply;
 				} catch (Backend.LimitException e) {
+					log(describe(r) + " is out of usage: " + e.getMessage());
 					long now = System.currentTimeMillis() / 1000;
-					long until = e.until > now ? e.until : now + hub.cfg.timing.limitCooldownMinutes * 60L;
-					benched.put(r.key(), until);
-					log(describe(r) + " is out of usage until " + hub.localTime(until) + ": " + e.getMessage());
+					bench(r, e.until > now ? e.until : now + hub.cfg.timing.limitCooldownMinutes * 60L, "is out of usage");
 					last = e;
-					if (i + 1 < order.size() && generation == gen && cfg.announceSwitches) {
-						hub.say(this, "(" + r.harness + " is out of usage, switching to " + order.get(i + 1).harness
-								+ " · back around " + hub.localTime(until) + ")", null, false);
-					}
 				} catch (Exception e) {
-					log(describe(r) + " failed: " + e.getMessage());
 					last = e;
+					if (generation != gen) break; // killed on purpose (turned off or reset): not the route's fault
+					log(describe(r) + " failed: " + e.getMessage());
+					Config.Timing t = hub.cfg.timing;
+					if (failures.merge(r.key(), 1, Integer::sum) >= t.failuresBeforeBench) {
+						bench(r, System.currentTimeMillis() / 1000 + t.errorBenchMinutes * 60L,
+								"failed " + t.failuresBeforeBench + " turns in a row (" + Backend.tail(e.getMessage(), 120) + ")");
+					}
 				}
 				if (generation != gen || !cfg.enabled) break; // killed on purpose: don't try the next route
 			}
@@ -400,7 +416,7 @@ final class Agent {
 	String status() {
 		List<String> parts = new ArrayList<>(List.of(cfg.enabled ? "on" : "off", describe(current())));
 		long out = cfg.routes.stream().filter(r -> benchedFor(r) > 0).count();
-		if (out > 0) parts.add(out + " of " + cfg.routes.size() + " routes out of usage");
+		if (out > 0) parts.add(out + " of " + cfg.routes.size() + " routes benched");
 		if (turnRole != null) parts.add("busy");
 		if (lastReply != null) parts.add("last reply " + Hub.ago(lastReply));
 		if (lastError != null) parts.add("last error: " + lastError);

@@ -85,18 +85,19 @@ final class AntigravityBackend extends Backend {
 		}
 	}
 
+	/** agy's model ids carry the effort (claude-sonnet-5-5-low, gemini-3.8-flash-high), so a bare model gets it appended. */
+	@Override
+	String modelId(String model, String effort) {
+		return model.isEmpty() || effort.isEmpty() || EFFORT_SUFFIX.matcher(model).find() ? model : model + "-" + effort;
+	}
+
 	private String runLocked(String prompt, String kind, List<String> players, String model, String effort) throws Exception {
 		prepare();
 		String conversation = session();
 		List<String> cmd = new ArrayList<>(List.of(harness().command, "--output-format", "json", "--disable-slash-commands",
 				"--print-timeout", agent.hub.cfg.timing.turnTimeoutSeconds + "s"));
-		// agy's model ids carry the effort (claude-sonnet-5-5-low, gemini-3.8-flash-high), so a bare model gets it appended.
-		if (!model.isEmpty()) {
-			boolean suffixed = EFFORT_SUFFIX.matcher(model).find();
-			cmd.addAll(List.of("--model", suffixed || effort.isEmpty() ? model : model + "-" + effort));
-		} else if (!effort.isEmpty()) {
-			cmd.addAll(List.of("--effort", effort));
-		}
+		if (!model.isEmpty()) cmd.addAll(List.of("--model", modelId(model, effort)));
+		else if (!effort.isEmpty()) cmd.addAll(List.of("--effort", effort));
 		cmd.addAll(harness().extraArgs);
 		if (conversation != null) cmd.addAll(List.of("--conversation", conversation));
 		cmd.addAll(List.of("-p", prompt));
@@ -114,7 +115,7 @@ final class AntigravityBackend extends Backend {
 			throw failure("agy failed (" + out.exitCode() + ")", why);
 		}
 		if (!str(res, "conversation_id").isEmpty()) setSession(str(res, "conversation_id"));
-		logUsage(res, kind, players, model);
+		logUsage(res, kind, players, modelId(model, effort));
 		return str(res, "response").strip();
 	}
 
