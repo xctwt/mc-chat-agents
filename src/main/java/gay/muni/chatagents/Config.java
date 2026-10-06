@@ -30,6 +30,8 @@ public class Config {
 	public Map<String, Harness> harnesses = new LinkedHashMap<>();
 	/** Optional model aliases, so one name works in every harness: alias -> harness name -> that harness's model id. */
 	public Map<String, Map<String, String>> models = new LinkedHashMap<>();
+	/** Extra regexes (case-insensitive) for CLI errors that mean a usage limit ran out, on top of the built-in ones. */
+	public List<String> limitPatterns = new ArrayList<>();
 	public List<AgentConfig> agents = new ArrayList<>();
 
 	public static class Timing {
@@ -51,6 +53,10 @@ public class Config {
 		public int maxRemindersPerPlayer = 10;
 		/** How long a route that ran out of usage is skipped, when the CLI doesn't say when the limit resets. */
 		public int limitCooldownMinutes = 60;
+		/** A route that fails this many turns in a row for other reasons (a broken login, say) is benched too... */
+		public int failuresBeforeBench = 3;
+		/** ...for this long. */
+		public int errorBenchMinutes = 5;
 	}
 
 	/** What the console tool lets an agent run. Rules match a command prefix on word boundaries. */
@@ -110,8 +116,8 @@ public class Config {
 		public List<Route> routes = new ArrayList<>();
 		/** When a route fails, retry the turn on the next one. Usage and rate limits also bench the route for a while. */
 		public boolean failover = true;
-		/** Say in chat when the agent moves to another route because one ran out of usage. */
-		public boolean announceSwitches = true;
+		/** Who is told when a route gets benched and the agent moves on: "ops", "everyone" or "off". */
+		public String announceSwitches = "ops";
 		/** Working directory for the CLIs (each harness gets a subdirectory); sessions are tied to it. */
 		public String workdir;
 		/** File in config/chatagents/prompts. */
@@ -188,6 +194,14 @@ public class Config {
 		if (c.agents == null) c.agents = new ArrayList<>();
 		if (c.harnesses == null) c.harnesses = new LinkedHashMap<>();
 		if (c.models == null) c.models = new LinkedHashMap<>();
+		if (c.limitPatterns == null) c.limitPatterns = new ArrayList<>();
+		for (String p : c.limitPatterns) {
+			try {
+				java.util.regex.Pattern.compile(p);
+			} catch (java.util.regex.PatternSyntaxException e) {
+				throw new IOException("bad limitPatterns entry " + p + ": " + e.getDescription());
+			}
+		}
 		boolean migrated = false;
 		for (AgentConfig a : c.agents) {
 			if (a.id == null) throw new IOException("every agent needs an id");
@@ -204,6 +218,11 @@ public class Config {
 				if (r.model == null) r.model = "";
 				if (r.effort == null) r.effort = "";
 			}
+			a.announceSwitches = switch (a.announceSwitches == null ? "ops" : a.announceSwitches.toLowerCase()) {
+				case "everyone", "all" -> "everyone";
+				case "off", "false", "none" -> "off";
+				default -> "ops"; // also the old boolean true
+			};
 			if (a.displayName == null) a.displayName = a.id;
 			if (a.workdir == null) a.workdir = "config/chatagents/work/" + a.id;
 			if (a.systemPrompt == null) a.systemPrompt = a.id + ".md";

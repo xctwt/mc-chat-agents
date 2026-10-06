@@ -60,7 +60,7 @@ Requires Minecraft 26.3, Fabric Loader 0.19.5+, Fabric API and Java 25. The mod 
 | `/clod on`, `/clod off` (any agent id) | operators (level 2) and the console |
 | `/clod` or `/clod status` | everyone |
 | `/clod reset` (start a fresh conversation) | operators |
-| `/clod routes` (harness + model list, what's out of usage) | everyone |
+| `/clod routes` (harness + model list, what's benched) | everyone |
 | `/clod use <harness> [model]`, `/clod model <model>` (switch, see below) | operators |
 | `/chatagents` (list all), `/chatagents reload` (re-read the config) | everyone / operators |
 
@@ -84,7 +84,12 @@ Turning an agent off kills a turn it's in the middle of and drops its queued mes
   "gatewayHost": "127.0.0.1",         // the MCP console gateway; port 0 = pick a free one
   "gatewayPort": 0,
   "stateDir": "config/chatagents/state",
-  "timing": { "cooldownSeconds": 8, "conversationSeconds": 90, "limitCooldownMinutes": 60, "...": "..." },
+  "timing": {
+    "cooldownSeconds": 8, "conversationSeconds": 90, "...": "...",
+    "limitCooldownMinutes": 60,       // bench a route that ran out of usage (if the CLI doesn't say until when)
+    "failuresBeforeBench": 3,         // bench a route after this many other failures in a row...
+    "errorBenchMinutes": 5            // ...for this long
+  },
   "policy": {
     "playerAllow": ["time query", "time add", "list"],
     "operatorDeny": ["stop", "op", "deop", "save-off", "reload", "ban-ip", "pardon-ip", "time set", "chatagents"]
@@ -108,6 +113,7 @@ Turning an agent off kills a turn it's in the middle of and drops its queued mes
       "opencode": "anthropic/claude-sonnet-5-5"
     }
   },
+  "limitPatterns": [],                // extra regexes for "out of usage" errors, on top of the built-in ones
   "agents": [
     {
       "id": "clod",                    // also the command: /clod
@@ -121,7 +127,7 @@ Turning an agent off kills a turn it's in the middle of and drops its queued mes
         { "harness": "agy", "model": "gemini-3.8-flash", "effort": "low" }
       ],
       "failover": true,                // on an error, retry the turn on the next route
-      "announceSwitches": true,        // say in chat when a route runs out of usage
+      "announceSwitches": "ops",       // who's told when a route is benched: "ops", "everyone" or "off"
       "workdir": "config/chatagents/work/clod",
       "systemPrompt": "clod.md",       // in config/chatagents/prompts; {name} and {triggers} are filled in
       "events": true,                  // react to deaths/advancements
@@ -146,17 +152,25 @@ the agent) are converted automatically the first time they're loaded.
 Claude Code, agy, Codex and opencode are harnesses: they can run some of the same models, but each has its own
 login and usage limits. So an agent isn't tied to one of them:
 
-- **Automatic failover.** A turn runs on the agent's first route. If that fails, it's retried on the next one. When
-  the error is a usage, quota or rate limit, the route is also benched until the limit resets (Claude Code reports
-  the time; for the others it's `limitCooldownMinutes`). Later turns skip it and go back to it once the limit has
-  reset. With `announceSwitches`, the agent says so in chat:
-  `<clod> (agy is out of usage, switching to claude · back around 10-06 19:00 Lisbon time)`.
-  Other errors move the turn down the list but don't bench the route. If every route is benched, the one that
-  resets soonest gets a try anyway.
+- **Automatic failover.** A turn runs on the agent's first route. If that fails, it's retried on the next one, and
+  the failed route may be benched so later turns skip it until it's likely to work again:
+  - a usage, quota or rate limit benches it until the limit resets (Claude Code reports the time; for the others
+    it's `limitCooldownMinutes`);
+  - any other error (an expired login, a crashed CLI) benches it for `errorBenchMinutes` once it has failed
+    `failuresBeforeBench` turns in a row, so a broken harness doesn't slow down every turn.
+
+  When a route is benched, `announceSwitches` decides who sees a gray note (operators by default):
+  `[clod] agy · sonnet (claude-sonnet-5-5-low) is out of usage, skipping it until 10-06 19:00 Lisbon time; using
+  claude · sonnet (claude-sonnet-5-5) for now`. It's in the server log either way. If every route is benched,
+  the one that frees up first gets a try anyway.
+- **Recognizing "out of usage".** Limit errors are recognized from the CLI's error text (`usage limit`, `quota`,
+  `RESOURCE_EXHAUSTED`, `429`, ...). If a CLI words it differently, the log shows the message as
+  `[clod] agy · sonnet (...) failed: ...`. Add a regex for it to `limitPatterns` and run `/chatagents reload`.
 - **Switching by hand.** `/clod use claude` moves clod to Claude Code and keeps the current model (the alias
   `sonnet` turns into Claude Code's ID for it). `/clod use opencode openai/gpt-5.5` picks a harness and a model.
   `/clod model opus` keeps the harness and changes the model. Each of these makes the chosen route the first one
-  (adding it if it's new) and saves the config. `/clod routes` lists the routes and which ones are out of usage.
+  (adding it if it's new), un-benches it, and saves the config. `/clod routes` lists the routes with the model ID
+  each harness is really given, and which ones are benched.
 - **Several logins for one CLI.** Two harnesses can use the same backend with different `home`s, for example
   `claude-main` and `claude-alt`, so one account can take over when the other runs out.
 

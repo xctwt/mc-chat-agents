@@ -24,7 +24,7 @@
 		"xctwt"
 	],
 	"contact": {
-		"sources": "https://github.com/xctwt/chat-agents",
-		"issues": "https://github.com/xctwt/chat-agents/issues"
+		"sources": "https://github.com/xctwt/mc-chat-agents",
+		"issues": "https://github.com/xctwt/mc-chat-agents/issues"
 	}
 }
