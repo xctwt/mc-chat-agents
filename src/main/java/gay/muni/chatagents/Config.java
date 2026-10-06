@@ -15,9 +15,9 @@ import java.util.Map;
 public class Config {
 	static final Gson GSON = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
 
-	/** IANA zone for the local time shown to agents, e.g. "Asia/Almaty". */
+	/** IANA zone for the local time shown to agents, e.g. "Europe/Lisbon". */
 	public String timezone = "UTC";
-	/** How the local time is labelled in prompts, e.g. "Astana time". */
+	/** How the local time is labelled in prompts, e.g. "Lisbon time". */
 	public String timezoneLabel = "local time";
 	/** The console gateway agents call through MCP. Port 0 picks a free port at startup. */
 	public String gatewayHost = "127.0.0.1";
@@ -139,6 +139,7 @@ public class Config {
 		c.harnesses.put("opencode", harness("opencode", System.getProperty("user.home") + "/.opencode/bin/opencode"));
 		Map<String, String> sonnet = new LinkedHashMap<>();
 		sonnet.put("claude", "claude-sonnet-5-5");
+		sonnet.put("agy", "claude-sonnet-5-5"); // agy adds the effort: claude-sonnet-5-5-low
 		sonnet.put("opencode", "anthropic/claude-sonnet-5-5");
 		c.models.put("sonnet", sonnet);
 
@@ -206,7 +207,7 @@ public class Config {
 			if (a.displayName == null) a.displayName = a.id;
 			if (a.workdir == null) a.workdir = "config/chatagents/work/" + a.id;
 			if (a.systemPrompt == null) a.systemPrompt = a.id + ".md";
-			if (a.triggers == null) a.triggers = new ArrayList<>(List.of(a.id));
+			if (a.triggers == null || a.triggers.isEmpty()) a.triggers = new ArrayList<>(List.of(a.id));
 		}
 		for (Map.Entry<String, Harness> e : c.harnesses.entrySet()) {
 			Harness h = e.getValue();

@@ -7,7 +7,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HexFormat;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,7 +34,14 @@ final class Agent {
 	volatile Config.AgentConfig cfg;
 	final Path stateDir;
 	final Path workdir;
-	final Backend backend;
+	/** One per harness this agent has used, by harness name and backend type. */
+	private final Map<String, Backend> backends = new ConcurrentHashMap<>();
+	/** Route key -> epoch seconds until which the route is skipped because it ran out of usage. */
+	private final Map<String, Long> benched = new ConcurrentHashMap<>();
+	/** The route that answered last. */
+	private volatile Config.Route active;
+	/** Bumped by halt(), so a turn that was killed on purpose doesn't fail over to the next route. */
+	private volatile int generation;
 	/** Bearer token for this agent's console tool; new on every server start. */
 	final String token;
 	private volatile Pattern trigger;
@@ -61,7 +67,6 @@ final class Agent {
 		byte[] b = new byte[24];
 		new SecureRandom().nextBytes(b);
 		this.token = HexFormat.of().formatHex(b);
-		this.backend = Backend.create(this);
 		update(cfg);
 	}
 
@@ -84,9 +89,65 @@ final class Agent {
 
 	/** Drops queued work and kills a running turn, e.g. when the agent is turned off. */
 	void halt() {
+		generation++;
 		pending.clear();
 		convo.clear();
-		backend.kill();
+		backends.values().forEach(Backend::kill);
+	}
+
+	// --- Harnesses and routes ---
+
+	Backend backend(String harness) {
+		Config.Harness h = hub.cfg.harnesses.get(harness);
+		if (h == null) throw new IllegalArgumentException("no harness called " + harness);
+		return backends.computeIfAbsent(harness + ":" + h.backend, k -> Backend.create(this, harness, h.backend));
+	}
+
+	/** Starts a fresh conversation in every harness. */
+	void resetSessions() {
+		for (Config.Route r : cfg.routes) backend(r.harness).reset();
+		backends.values().forEach(Backend::reset);
+	}
+
+	/** Seconds until the route may be used again, or 0 if it's available. */
+	long benchedFor(Config.Route r) {
+		return Math.max(benched.getOrDefault(r.key(), 0L) - System.currentTimeMillis() / 1000, 0);
+	}
+
+	/** The route the next turn will try first. */
+	Config.Route current() {
+		List<Config.Route> routes = cfg.routes;
+		return routes.stream().filter(r -> benchedFor(r) == 0).findFirst().orElse(routes.getFirst());
+	}
+
+	Config.Route active() {
+		return active;
+	}
+
+	/**
+	 * Makes harness + model the preferred route, keeping the current model when model is null (and the current
+	 * harness when harness is null). Returns the route; the caller saves the config.
+	 */
+	Config.Route use(String harness, String model) {
+		if (harness != null && !hub.cfg.harnesses.containsKey(harness)) {
+			throw new IllegalArgumentException("no harness called " + harness + "; known: " + hub.cfg.harnesses.keySet());
+		}
+		Config.Route cur = current();
+		String h = harness != null ? harness : cur.harness, m = model != null ? model : cur.model;
+		List<Config.Route> routes = new ArrayList<>(cfg.routes);
+		Config.Route pick = routes.stream().filter(r -> r.harness.equals(h) && r.model.equals(m)).findFirst()
+				.orElseGet(() -> new Config.Route(h, m, cur.effort));
+		routes.remove(pick);
+		routes.addFirst(pick);
+		cfg.routes = routes;
+		benched.remove(pick.key()); // asked for by hand, so give it another try
+		return pick;
+	}
+
+	String describe(Config.Route r) {
+		String model = hub.cfg.modelFor(r);
+		String label = r.harness + " · " + (r.model.isEmpty() ? "default model" : r.model);
+		return model.equals(r.model) ? label : label + " (" + model + ")";
 	}
 
 	void enqueue(Item item) {
@@ -242,7 +303,7 @@ final class Agent {
 		}
 		if (RESET.matcher(reply).find()) {
 			if (elevated) {
-				backend.reset();
+				resetSessions();
 				convo.clear();
 				log("chat reset by operator request");
 			} else {
@@ -273,13 +334,46 @@ final class Agent {
 		return !isSilent(reply);
 	}
 
+	/**
+	 * Runs the turn on the first route that isn't benched, moving down the list when one fails (if failover is on).
+	 * A route that ran out of usage is benched until its limit resets, so later turns skip it and come back to it
+	 * on their own afterwards. If every route is benched, the one that frees up first gets a try anyway.
+	 */
 	private String turn(String prompt, Console.Role role, String kind, List<String> players) throws Exception {
+		int gen = generation;
+		List<Config.Route> order = cfg.routes.stream().filter(r -> benchedFor(r) == 0).toList();
+		if (order.isEmpty()) {
+			order = List.of(cfg.routes.stream().min(java.util.Comparator.comparingLong(this::benchedFor)).orElseThrow());
+		}
+		if (!cfg.failover) order = order.subList(0, 1);
+		Exception last = null;
 		turnRole = role;
 		try {
-			String reply = backend.run(prompt, kind, players);
-			lastError = null;
-			lastReply = Instant.now();
-			return reply;
+			for (int i = 0; i < order.size(); i++) {
+				Config.Route r = order.get(i);
+				try {
+					String reply = backend(r.harness).run(prompt, kind, players, hub.cfg.modelFor(r), r.effort);
+					active = r;
+					lastError = null;
+					lastReply = Instant.now();
+					return reply;
+				} catch (Backend.LimitException e) {
+					long now = System.currentTimeMillis() / 1000;
+					long until = e.until > now ? e.until : now + hub.cfg.timing.limitCooldownMinutes * 60L;
+					benched.put(r.key(), until);
+					log(describe(r) + " is out of usage until " + hub.localTime(until) + ": " + e.getMessage());
+					last = e;
+					if (i + 1 < order.size() && generation == gen && cfg.announceSwitches) {
+						hub.say(this, "(" + r.harness + " is out of usage, switching to " + order.get(i + 1).harness
+								+ " · back around " + hub.localTime(until) + ")", null, false);
+					}
+				} catch (Exception e) {
+					log(describe(r) + " failed: " + e.getMessage());
+					last = e;
+				}
+				if (generation != gen || !cfg.enabled) break; // killed on purpose: don't try the next route
+			}
+			throw last;
 		} finally {
 			turnRole = null;
 		}
@@ -304,8 +398,9 @@ final class Agent {
 	}
 
 	String status() {
-		List<String> parts = new ArrayList<>(new LinkedHashSet<>(List.of(cfg.enabled ? "on" : "off", cfg.backend)));
-		if (!cfg.model.isEmpty()) parts.add(cfg.model);
+		List<String> parts = new ArrayList<>(List.of(cfg.enabled ? "on" : "off", describe(current())));
+		long out = cfg.routes.stream().filter(r -> benchedFor(r) > 0).count();
+		if (out > 0) parts.add(out + " of " + cfg.routes.size() + " routes out of usage");
 		if (turnRole != null) parts.add("busy");
 		if (lastReply != null) parts.add("last reply " + Hub.ago(lastReply));
 		if (lastError != null) parts.add("last error: " + lastError);

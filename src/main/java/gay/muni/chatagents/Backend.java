@@ -1,49 +1,97 @@
 package gay.muni.chatagents;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
-/** One agent CLI. Implementations run a single turn in the agent's persistent conversation. */
+/**
+ * One harness (agent CLI) for one agent. Implementations run a single turn in the agent's persistent conversation
+ * in that harness; each harness keeps its own session and working directory.
+ */
 abstract class Backend {
+	/** Error text that means a usage, quota or rate limit ran out rather than something being broken. */
+	private static final Pattern LIMIT = Pattern.compile("usage limit|rate.?limit|limit reached|hit your limit|quota"
+			+ "|resource.?exhausted|too many requests|\\b429\\b|credit balance|out of credits", Pattern.CASE_INSENSITIVE);
+
 	final Agent agent;
+	/** The harness's key in the config. */
+	final String name;
 	private volatile Process process;
 
-	Backend(Agent agent) {
+	Backend(Agent agent, String name) {
 		this.agent = agent;
+		this.name = name;
 	}
 
-	static Backend create(Agent agent) {
-		return switch (agent.cfg.backend) {
-			case "claude" -> new ClaudeBackend(agent);
-			case "antigravity" -> new AntigravityBackend(agent);
-			case "codex" -> new CodexBackend(agent);
-			case "opencode" -> new OpenCodeBackend(agent);
-			default -> throw new IllegalArgumentException("unknown backend: " + agent.cfg.backend);
+	static Backend create(Agent agent, String name, String backend) {
+		return switch (backend) {
+			case "claude" -> new ClaudeBackend(agent, name);
+			case "antigravity" -> new AntigravityBackend(agent, name);
+			case "codex" -> new CodexBackend(agent, name);
+			case "opencode" -> new OpenCodeBackend(agent, name);
+			default -> throw new IllegalArgumentException("unknown backend: " + backend);
 		};
 	}
 
-	/** Runs one turn and returns the agent's reply text. */
-	abstract String run(String prompt, String kind, List<String> players) throws Exception;
+	/** Runs one turn and returns the agent's reply text. model is already resolved for this harness. */
+	abstract String run(String prompt, String kind, List<String> players, String model, String effort) throws Exception;
+
+	/** A turn failed because a usage, quota or rate limit ran out. until: epoch seconds when it resets, 0 if unknown. */
+	static final class LimitException extends RuntimeException {
+		final long until;
+
+		LimitException(String message, long until) {
+			super(message);
+			this.until = until;
+		}
+	}
+
+	static boolean isLimit(String why) {
+		return LIMIT.matcher(why).find();
+	}
+
+	/** The exception for a failed turn: a LimitException if the error looks like a usage limit. */
+	static RuntimeException failure(String what, String why) {
+		return isLimit(why) ? new LimitException(what + ": " + why, 0) : new RuntimeException(what + ": " + why);
+	}
+
+	Config.Harness harness() {
+		Config.Harness h = agent.hub.cfg.harnesses.get(name);
+		if (h == null) throw new IllegalStateException("harness " + name + " is no longer in the config");
+		return h;
+	}
+
+	Path workdir() {
+		return agent.workdir.resolve(name);
+	}
 
 	/** Forgets the conversation so the next turn starts fresh. */
 	void reset() {
-		Store.writeString(agent.stateDir.resolve("session"), "");
+		Store.writeString(sessionFile(), "");
 	}
 
 	String session() {
-		String s = Store.readString(agent.stateDir.resolve("session"));
+		String s = Store.readString(sessionFile());
 		return s.isEmpty() ? null : s;
 	}
 
 	void setSession(String id) {
-		Store.writeString(agent.stateDir.resolve("session"), id == null ? "" : id);
+		Store.writeString(sessionFile(), id == null ? "" : id);
+	}
+
+	private Path sessionFile() {
+		return agent.stateDir.resolve("session-" + name);
 	}
 
 	void kill() {
@@ -54,20 +102,21 @@ abstract class Backend {
 
 	record Output(int exitCode, String stderr) {}
 
-	/** Starts the CLI, feeds stdin, hands each stdout line to onLine, and kills it after the turn timeout. */
 	Output exec(List<String> cmd, String stdin, Consumer<String> onLine) throws IOException, InterruptedException {
 		return exec(cmd, stdin, Map.of(), onLine);
 	}
 
-	/** Like exec, with extra environment variables set after the agent's own (e.g. the console tool's token). */
+	/** Starts the CLI, feeds stdin, hands each stdout line to onLine, and kills it after the turn timeout. */
 	Output exec(List<String> cmd, String stdin, Map<String, String> extraEnv, Consumer<String> onLine)
 			throws IOException, InterruptedException {
-		List<String> full = new java.util.ArrayList<>(agent.cfg.commandPrefix);
+		Config.Harness h = harness();
+		List<String> full = new java.util.ArrayList<>(h.commandPrefix);
 		full.addAll(cmd);
-		ProcessBuilder pb = new ProcessBuilder(full).directory(agent.workdir.toFile());
+		Files.createDirectories(workdir());
+		ProcessBuilder pb = new ProcessBuilder(full).directory(workdir().toFile());
 		Map<String, String> env = pb.environment();
-		if (!agent.cfg.home.isEmpty()) env.put("HOME", agent.cfg.home);
-		env.putAll(agent.cfg.env);
+		if (!h.home.isEmpty()) env.put("HOME", h.home);
+		env.putAll(h.env);
 		env.putAll(extraEnv);
 		Process p = pb.start();
 		process = p;
@@ -86,7 +135,7 @@ abstract class Backend {
 		Thread killer = Thread.ofVirtual().start(() -> {
 			try {
 				if (!p.waitFor(agent.hub.cfg.timing.turnTimeoutSeconds, TimeUnit.SECONDS)) {
-					ChatAgents.LOG.warn("[{}] turn timed out, killing the CLI", agent.cfg.id);
+					ChatAgents.LOG.warn("[{}] turn timed out on {}, killing the CLI", agent.cfg.id, name);
 					kill();
 				}
 			} catch (InterruptedException ignored) {
@@ -111,12 +160,26 @@ abstract class Backend {
 		}
 	}
 
+	/** The fields every usage.jsonl record has; backends add their own token counts. */
+	JsonObject usageRecord(String kind, List<String> players, String session, String model) {
+		JsonObject rec = new JsonObject();
+		rec.addProperty("ts", System.currentTimeMillis() / 1000.0);
+		rec.addProperty("kind", kind);
+		JsonArray ps = new JsonArray();
+		players.forEach(ps::add);
+		rec.add("players", ps);
+		rec.addProperty("harness", name);
+		rec.addProperty("model", model);
+		rec.addProperty("session", session);
+		return rec;
+	}
+
+	void logUsage(JsonObject rec) {
+		Store.appendLine(agent.stateDir.resolve("usage.jsonl"), rec.toString());
+	}
+
 	static String tail(String s, int n) {
 		s = s.strip();
 		return s.length() <= n ? s : s.substring(s.length() - n);
-	}
-
-	Path path(String p) {
-		return agent.hub.serverDir.resolve(p);
 	}
 }

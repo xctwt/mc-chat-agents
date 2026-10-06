@@ -8,6 +8,10 @@ import com.google.gson.JsonParser;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
 
 import static gay.muni.chatagents.ClaudeBackend.num;
 import static gay.muni.chatagents.ClaudeBackend.str;
@@ -18,16 +22,20 @@ import static gay.muni.chatagents.ClaudeBackend.str;
  * permission rules it needs are merged into agy's own config files under HOME.
  */
 final class AntigravityBackend extends Backend {
-	AntigravityBackend(Agent agent) {
-		super(agent);
+	private static final Map<Path, ReentrantLock> HOMES = new ConcurrentHashMap<>();
+	private static final Pattern EFFORT_SUFFIX = Pattern.compile("-(minimal|low|medium|high|max)$");
+
+	AntigravityBackend(Agent agent, String name) {
+		super(agent, name);
 	}
 
 	private Path home() {
-		return Path.of(agent.cfg.home.isEmpty() ? System.getProperty("user.home") : agent.cfg.home);
+		String home = harness().home;
+		return Path.of(home.isEmpty() ? System.getProperty("user.home") : home);
 	}
 
 	private void prepare() {
-		Store.writeString(agent.workdir.resolve("AGENTS.md"), agent.systemPrompt());
+		Store.writeString(workdir().resolve("AGENTS.md"), agent.systemPrompt());
 
 		Path mcpFile = home().resolve(".gemini/config/mcp_config.json");
 		JsonObject mcp = Store.read(mcpFile, new JsonObject()) instanceof JsonObject o ? o : new JsonObject();
@@ -66,14 +74,30 @@ final class AntigravityBackend extends Backend {
 	}
 
 	@Override
-	String run(String prompt, String kind, List<String> players) throws Exception {
+	String run(String prompt, String kind, List<String> players, String model, String effort) throws Exception {
+		// The console server entry in HOME holds this agent's URL and token, so agents sharing a HOME take turns.
+		ReentrantLock lock = HOMES.computeIfAbsent(home().toAbsolutePath().normalize(), h -> new ReentrantLock());
+		lock.lockInterruptibly();
+		try {
+			return runLocked(prompt, kind, players, model, effort);
+		} finally {
+			lock.unlock();
+		}
+	}
+
+	private String runLocked(String prompt, String kind, List<String> players, String model, String effort) throws Exception {
 		prepare();
 		String conversation = session();
-		List<String> cmd = new ArrayList<>(List.of(agent.cfg.command, "--output-format", "json", "--disable-slash-commands",
+		List<String> cmd = new ArrayList<>(List.of(harness().command, "--output-format", "json", "--disable-slash-commands",
 				"--print-timeout", agent.hub.cfg.timing.turnTimeoutSeconds + "s"));
-		if (!agent.cfg.model.isEmpty()) cmd.addAll(List.of("--model", agent.cfg.model));
-		if (!agent.cfg.effort.isEmpty()) cmd.addAll(List.of("--effort", agent.cfg.effort));
-		cmd.addAll(agent.cfg.extraArgs);
+		// agy's model ids carry the effort (claude-sonnet-5-5-low, gemini-3.8-flash-high), so a bare model gets it appended.
+		if (!model.isEmpty()) {
+			boolean suffixed = EFFORT_SUFFIX.matcher(model).find();
+			cmd.addAll(List.of("--model", suffixed || effort.isEmpty() ? model : model + "-" + effort));
+		} else if (!effort.isEmpty()) {
+			cmd.addAll(List.of("--effort", effort));
+		}
+		cmd.addAll(harness().extraArgs);
 		if (conversation != null) cmd.addAll(List.of("--conversation", conversation));
 		cmd.addAll(List.of("-p", prompt));
 
@@ -82,15 +106,15 @@ final class AntigravityBackend extends Backend {
 		JsonObject res = parse(stdout.toString());
 		if (res == null || !str(res, "status").equals("SUCCESS")) {
 			String why = res == null ? tail(out.stderr() + stdout, 500) : str(res, "status") + ": " + str(res, "error");
-			if (conversation != null) { // the conversation may be gone; start fresh once
-				agent.log("resume failed, starting a new conversation: " + why);
+			if (conversation != null && !isLimit(why)) { // the conversation may be gone; start fresh once
+				agent.log("resume failed on " + name + ", starting a new conversation: " + why);
 				setSession(null);
-				return run(prompt, kind, players);
+				return runLocked(prompt, kind, players, model, effort);
 			}
-			throw new RuntimeException("agy failed (" + out.exitCode() + "): " + why);
+			throw failure("agy failed (" + out.exitCode() + ")", why);
 		}
 		if (!str(res, "conversation_id").isEmpty()) setSession(str(res, "conversation_id"));
-		logUsage(res, kind, players);
+		logUsage(res, kind, players, model);
 		return str(res, "response").strip();
 	}
 
@@ -109,20 +133,14 @@ final class AntigravityBackend extends Backend {
 		}
 	}
 
-	private void logUsage(JsonObject out, String kind, List<String> players) {
+	private void logUsage(JsonObject out, String kind, List<String> players, String model) {
 		JsonObject u = out.get("usage") instanceof JsonObject o ? o : new JsonObject();
-		JsonObject rec = new JsonObject();
-		rec.addProperty("ts", System.currentTimeMillis() / 1000.0);
-		rec.addProperty("kind", kind);
-		JsonArray ps = new JsonArray();
-		players.forEach(ps::add);
-		rec.add("players", ps);
+		JsonObject rec = usageRecord(kind, players, str(out, "conversation_id"), model);
 		rec.addProperty("turns", (long) num(out, "num_turns"));
 		rec.addProperty("ms", Math.round(num(out, "duration_seconds") * 1000));
-		rec.addProperty("session", str(out, "conversation_id"));
 		for (String k : List.of("input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens", "total_tokens")) {
 			rec.addProperty(k, (long) num(u, k));
 		}
-		Store.appendLine(agent.stateDir.resolve("usage.jsonl"), rec.toString());
+		logUsage(rec);
 	}
 }

@@ -1,6 +1,5 @@
 package gay.muni.chatagents;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -19,17 +18,17 @@ import static gay.muni.chatagents.ClaudeBackend.str;
 final class OpenCodeBackend extends Backend {
 	private static final String AGENT = "chatagents";
 
-	OpenCodeBackend(Agent agent) {
-		super(agent);
+	OpenCodeBackend(Agent agent, String name) {
+		super(agent, name);
 	}
 
 	@Override
-	String run(String prompt, String kind, List<String> players) throws Exception {
+	String run(String prompt, String kind, List<String> players, String model, String effort) throws Exception {
 		String sid = session();
-		List<String> cmd = new ArrayList<>(List.of(agent.cfg.command, "run", "--format", "json", "--agent", AGENT));
-		if (!agent.cfg.model.isEmpty()) cmd.addAll(List.of("--model", agent.cfg.model));
-		if (!agent.cfg.effort.isEmpty()) cmd.addAll(List.of("--variant", agent.cfg.effort));
-		cmd.addAll(agent.cfg.extraArgs);
+		List<String> cmd = new ArrayList<>(List.of(harness().command, "run", "--format", "json", "--agent", AGENT));
+		if (!model.isEmpty()) cmd.addAll(List.of("--model", model));
+		if (!effort.isEmpty()) cmd.addAll(List.of("--variant", effort));
+		cmd.addAll(harness().extraArgs);
 		if (sid != null) cmd.addAll(List.of("--session", sid));
 
 		StringBuilder reply = new StringBuilder();
@@ -59,15 +58,15 @@ final class OpenCodeBackend extends Backend {
 		});
 		if (!finished[0] || error[0] != null) {
 			String why = error[0] != null ? error[0] : tail(out.stderr(), 500);
-			if (sid != null) { // the session may be gone; start fresh once
-				agent.log("resume failed, starting a new session: " + why);
+			if (sid != null && !isLimit(why)) { // the session may be gone; start fresh once
+				agent.log("resume failed on " + name + ", starting a new session: " + why);
 				setSession(null);
-				return run(prompt, kind, players);
+				return run(prompt, kind, players, model, effort);
 			}
-			throw new RuntimeException("opencode failed (" + out.exitCode() + "): " + why);
+			throw failure("opencode failed (" + out.exitCode() + ")", why);
 		}
 		if (sessionId[0] != null) setSession(sessionId[0]);
-		logUsage(totals, sessionId[0], kind, players);
+		logUsage(totals, sessionId[0], kind, players, model);
 		return reply.toString().strip();
 	}
 
@@ -123,18 +122,12 @@ final class OpenCodeBackend extends Backend {
 		o.addProperty(key, num(o, key) + v);
 	}
 
-	private void logUsage(JsonObject totals, String sid, String kind, List<String> players) {
-		JsonObject rec = new JsonObject();
-		rec.addProperty("ts", System.currentTimeMillis() / 1000.0);
-		rec.addProperty("kind", kind);
-		JsonArray ps = new JsonArray();
-		players.forEach(ps::add);
-		rec.add("players", ps);
-		rec.addProperty("session", sid);
+	private void logUsage(JsonObject totals, String sid, String kind, List<String> players, String model) {
+		JsonObject rec = usageRecord(kind, players, sid, model);
 		rec.addProperty("cost_usd", Math.round(num(totals, "cost_usd") * 1e6) / 1e6);
 		for (String k : List.of("input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens")) {
 			rec.addProperty(k, (long) num(totals, k));
 		}
-		Store.appendLine(agent.stateDir.resolve("usage.jsonl"), rec.toString());
+		logUsage(rec);
 	}
 }

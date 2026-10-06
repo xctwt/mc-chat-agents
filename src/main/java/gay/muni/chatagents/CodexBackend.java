@@ -1,6 +1,5 @@
 package gay.muni.chatagents;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
@@ -21,14 +20,14 @@ import static gay.muni.chatagents.ClaudeBackend.str;
 final class CodexBackend extends Backend {
 	private static final String TOKEN_ENV = "CHATAGENTS_MCP_TOKEN";
 
-	CodexBackend(Agent agent) {
-		super(agent);
+	CodexBackend(Agent agent, String name) {
+		super(agent, name);
 	}
 
 	@Override
-	String run(String prompt, String kind, List<String> players) throws Exception {
+	String run(String prompt, String kind, List<String> players, String model, String effort) throws Exception {
 		String thread = session();
-		List<String> cmd = new ArrayList<>(List.of(agent.cfg.command, "exec", "--json", "--skip-git-repo-check"));
+		List<String> cmd = new ArrayList<>(List.of(harness().command, "exec", "--json", "--skip-git-repo-check"));
 		set(cmd, "sandbox_mode", toml("read-only"));
 		set(cmd, "approval_policy", toml("never"));
 		set(cmd, "features.shell_tool", "false");
@@ -37,9 +36,9 @@ final class CodexBackend extends Backend {
 		set(cmd, "mcp_servers.minecraft.url", toml(agent.hub.gateway.url(agent.cfg.id)));
 		set(cmd, "mcp_servers.minecraft.bearer_token_env_var", toml(TOKEN_ENV));
 		set(cmd, "mcp_servers.minecraft.default_tools_approval_mode", toml("approve"));
-		if (!agent.cfg.model.isEmpty()) set(cmd, "model", toml(agent.cfg.model));
-		if (!agent.cfg.effort.isEmpty()) set(cmd, "model_reasoning_effort", toml(agent.cfg.effort));
-		cmd.addAll(agent.cfg.extraArgs);
+		if (!model.isEmpty()) set(cmd, "model", toml(model));
+		if (!effort.isEmpty()) set(cmd, "model_reasoning_effort", toml(effort));
+		cmd.addAll(harness().extraArgs);
 		if (thread != null) cmd.addAll(List.of("resume", thread));
 		cmd.add("-"); // the prompt comes from stdin
 
@@ -66,15 +65,15 @@ final class CodexBackend extends Backend {
 		});
 		if (usage[0] == null) {
 			String why = error[0] != null ? error[0] : tail(out.stderr(), 500);
-			if (thread != null) { // the thread may be gone; start fresh once
-				agent.log("resume failed, starting a new thread: " + why);
+			if (thread != null && !isLimit(why)) { // the thread may be gone; start fresh once
+				agent.log("resume failed on " + name + ", starting a new thread: " + why);
 				setSession(null);
-				return run(prompt, kind, players);
+				return run(prompt, kind, players, model, effort);
 			}
-			throw new RuntimeException("codex failed (" + out.exitCode() + "): " + why);
+			throw failure("codex failed (" + out.exitCode() + ")", why);
 		}
 		if (threadId[0] != null && !threadId[0].isEmpty()) setSession(threadId[0]);
-		logUsage(usage[0], threadId[0] != null ? threadId[0] : thread, kind, players);
+		logUsage(usage[0], threadId[0] != null ? threadId[0] : thread, kind, players, model);
 		return reply[0] == null ? "" : reply[0].strip();
 	}
 
@@ -92,17 +91,11 @@ final class CodexBackend extends Backend {
 		return str(ev, "message");
 	}
 
-	private void logUsage(JsonObject u, String thread, String kind, List<String> players) {
-		JsonObject rec = new JsonObject();
-		rec.addProperty("ts", System.currentTimeMillis() / 1000.0);
-		rec.addProperty("kind", kind);
-		JsonArray ps = new JsonArray();
-		players.forEach(ps::add);
-		rec.add("players", ps);
-		rec.addProperty("session", thread);
+	private void logUsage(JsonObject u, String thread, String kind, List<String> players, String model) {
+		JsonObject rec = usageRecord(kind, players, thread, model);
 		for (String k : List.of("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")) {
 			rec.addProperty(k, (long) num(u, k));
 		}
-		Store.appendLine(agent.stateDir.resolve("usage.jsonl"), rec.toString());
+		logUsage(rec);
 	}
 }
